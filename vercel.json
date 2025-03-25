@@ -1,5 +1,10 @@
 {
   "version": 2,
+  "functions": {
+    "api/edge.js": {
+      "runtime": "edge"
+    }
+  },
   "builds": [
     {
       "src": "api/**/*.ts",
@@ -25,6 +30,10 @@
     {
       "src": "/api/test",
       "dest": "/api/test.ts"
+    },
+    {
+      "src": "/api/edge",
+      "dest": "/api/edge.js"
     },
     {
       "src": "/",
