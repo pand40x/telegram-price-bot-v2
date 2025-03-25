@@ -23,6 +23,10 @@
       "dest": "/api/simple-webhook.ts"
     },
     {
+      "src": "/api/test",
+      "dest": "/api/test.ts"
+    },
+    {
       "src": "/",
       "dest": "/public/index.html"
     }
