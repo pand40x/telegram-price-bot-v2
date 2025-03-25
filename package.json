@@ -23,7 +23,7 @@
     "@nestjs/platform-express": "^10.0.0",
     "@nestjs/schedule": "^3.0.0",
     "@types/ws": "^8.18.0",
-    "axios": "^1.5.0",
+    "axios": "^1.8.4",
     "mongoose": "^7.5.0",
     "nestjs-telegraf": "2.7.0",
     "reflect-metadata": "0.2.2",

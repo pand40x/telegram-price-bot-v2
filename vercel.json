@@ -41,6 +41,7 @@
     }
   ],
   "env": {
-    "VERCEL": "true"
+    "VERCEL": "true",
+    "TELEGRAM_BOT_TOKEN": "1875537160:AAE27T3oiuUcw1zVFT0wtF_TBeDtwcUkXqg"
   }
 } 
