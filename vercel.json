@@ -7,6 +7,10 @@
       "config": {
         "buildCommand": "npm install --legacy-peer-deps && npm run build"
       }
+    },
+    {
+      "src": "public/**/*",
+      "use": "@vercel/static"
     }
   ],
   "routes": [
@@ -17,6 +21,10 @@
     {
       "src": "/api/simple-webhook",
       "dest": "/api/simple-webhook.ts"
+    },
+    {
+      "src": "/",
+      "dest": "/public/index.html"
     }
   ],
   "env": {
