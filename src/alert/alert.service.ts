@@ -429,9 +429,9 @@ export class AlertService {
     }
   }
 
-  @Cron(CronExpression.EVERY_MINUTE)
-  async checkAlertLists() {
-    this.logger.debug('Uyarı listelerini kontrol etme zamanı');
+  @Cron('*/1 * * * *')
+  async checkCryptoAlertLists() {
+    this.logger.debug('Kripto uyarı listelerini kontrol etme zamanı');
     
     try {
       // Aktif uyarı listelerini bul
@@ -447,8 +447,18 @@ export class AlertService {
       for (const list of activeLists) {
         if (list.symbols.length === 0) continue;
         
+        // Liste adından veya içeriğinden crypto tipini belirle
+        const isCryptoList = !list.listName.includes('hisse') && 
+          list.symbols.every(symbol => 
+            !symbol.endsWith('.IS') && 
+            !symbol.includes('XU') && 
+            !['BIST', 'BIST100', 'XU100'].includes(symbol)
+          );
+        
+        if (!isCryptoList) continue; // Sadece kripto listelerini işle
+        
         // Listedeki sembollerin fiyatlarını al - crypto tipinde
-        this.logger.debug(`"${list.listName}" listesindeki ${list.symbols.length} sembol için fiyat alınıyor`);
+        this.logger.debug(`"${list.listName}" listesindeki ${list.symbols.length} kripto sembol için fiyat alınıyor`);
         const prices = await this.priceService.getPrices(list.symbols, 'crypto');
         
         if (prices.length === 0) continue;
@@ -496,11 +506,11 @@ export class AlertService {
         // Eğer alarm mesajı varsa, bildirim gönder
         if (alertMessages.length > 0) {
           // Bildirim gönderilecek chat ID'sini belirle
-          const chatId = list.chatId || list.userId; // Eğer chatId varsa onu kullan, yoksa userId'yi kullan
+          const chatId = list.chatId || list.userId;
           const listType = list.isGroupChat ? 'grup' : 'kişisel';
           
           // Mesajın formatını sadeleştir
-          const alertMessage = `🚨 "${list.listName}" için fiyat uyarıları:\n\n${alertMessages.join('\n')}`;
+          const alertMessage = `🚨 "${list.listName}" için kripto fiyat uyarıları:\n\n${alertMessages.join('\n')}`;
           
           try {
             this.logger.debug(`${listType} bildirim gönderiliyor, Chat ID: ${chatId}`);
@@ -514,7 +524,106 @@ export class AlertService {
         await this.updateLastCheckTime(list._id);
       }
     } catch (error) {
-      this.logger.error(`Uyarı listeleri kontrol hatası: ${error.message}`);
+      this.logger.error(`Kripto uyarı listeleri kontrol hatası: ${error.message}`);
+    }
+  }
+
+  @Cron('*/15 * * * *')
+  async checkStockAlertLists() {
+    this.logger.debug('Hisse uyarı listelerini kontrol etme zamanı');
+    
+    try {
+      // Aktif uyarı listelerini bul
+      const activeLists = await this.alertListModel.find({ isActive: true }).exec();
+      
+      if (activeLists.length === 0) {
+        this.logger.debug('Aktif uyarı listesi bulunamadı');
+        return;
+      }
+      
+      this.logger.debug(`${activeLists.length} adet aktif uyarı listesi kontrol ediliyor`);
+      
+      for (const list of activeLists) {
+        if (list.symbols.length === 0) continue;
+        
+        // Liste adından veya içeriğinden stock tipini belirle
+        const isStockList = list.listName.includes('hisse') || 
+          list.symbols.some(symbol => 
+            symbol.endsWith('.IS') || 
+            symbol.includes('XU') || 
+            ['BIST', 'BIST100', 'XU100'].includes(symbol)
+          );
+        
+        if (!isStockList) continue; // Sadece hisse listelerini işle
+        
+        // Listedeki sembollerin fiyatlarını al - stock tipinde
+        this.logger.debug(`"${list.listName}" listesindeki ${list.symbols.length} hisse sembol için fiyat alınıyor`);
+        const prices = await this.priceService.getPrices(list.symbols, 'stock');
+        
+        if (prices.length === 0) continue;
+        
+        const alertMessages: string[] = [];
+        
+        // Her semboldeki fiyat değişikliklerini kontrol et
+        for (const price of prices) {
+          const symbol = price.symbol;
+          const currentPrice = price.price;
+          const lastPrice = list.lastPrices.get(symbol) || 0;
+          
+          if (lastPrice === 0) {
+            // İlk kez fiyat alınıyorsa, kaydet ve geç
+            await this.updateLastPrice(list._id, symbol, currentPrice);
+            continue;
+          }
+          
+          // Yüzde değişimi hesapla
+          const percentChange = ((currentPrice - lastPrice) / lastPrice) * 100;
+          
+          // Sembol için özel eşik değerini al, yoksa listedeki genel eşiği kullan
+          const thresholdPercent = list.highThresholds.get(symbol) || list.percentChangeThreshold;
+          this.logger.debug(`"${symbol}" için eşik kontrolü: değişim %${percentChange.toFixed(2)}, eşik %${thresholdPercent}`);
+          
+          // Eşik değerini kontrol et
+          if (Math.abs(percentChange) >= thresholdPercent) {
+            // Daha sade format oluştur
+            const direction = percentChange > 0 ? '📈' : '📉';
+            const absPercentChange = Math.abs(percentChange).toFixed(2);
+            
+            // Artık veya azalış olarak tanımla
+            const changeType = percentChange > 0 ? "yükseldi" : "düştü";
+            
+            // Sade format ile mesaj oluştur
+            const message = `${direction} ${symbol} %${absPercentChange} ${changeType}, fiyat: ${currentPrice.toFixed(8)}`;
+            
+            alertMessages.push(message);
+            
+            // Son fiyatı güncelle
+            await this.updateLastPrice(list._id, symbol, currentPrice);
+          }
+        }
+        
+        // Eğer alarm mesajı varsa, bildirim gönder
+        if (alertMessages.length > 0) {
+          // Bildirim gönderilecek chat ID'sini belirle
+          const chatId = list.chatId || list.userId;
+          const listType = list.isGroupChat ? 'grup' : 'kişisel';
+          
+          // Mesajın formatını sadeleştir
+          const alertMessage = `🚨 "${list.listName}" için hisse fiyat uyarıları:\n\n${alertMessages.join('\n')}`;
+          
+          try {
+            this.logger.debug(`${listType} bildirim gönderiliyor, Chat ID: ${chatId}`);
+            await this.bot.telegram.sendMessage(chatId, alertMessage);
+          } catch (error) {
+            this.logger.error(`Telegram mesajı gönderme hatası: ${error.message}`);
+          }
+        }
+        
+        // Son kontrol zamanını güncelle
+        await this.updateLastCheckTime(list._id);
+      }
+    } catch (error) {
+      this.logger.error(`Hisse uyarı listeleri kontrol hatası: ${error.message}`);
     }
   }
 
