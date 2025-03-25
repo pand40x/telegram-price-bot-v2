@@ -2,17 +2,20 @@
   "version": 2,
   "builds": [
     {
-      "src": "src/main.ts",
+      "src": "api/**/*.ts",
       "use": "@vercel/node",
       "config": {
-        "buildCommand": "./build.sh"
+        "buildCommand": "npm install --legacy-peer-deps && npm run build"
       }
     }
   ],
   "routes": [
     {
-      "src": "/(.*)",
-      "dest": "src/main.ts"
+      "src": "/api/webhook",
+      "dest": "/api/webhook.ts"
     }
-  ]
+  ],
+  "env": {
+    "VERCEL": "true"
+  }
 } 

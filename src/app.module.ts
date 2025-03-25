@@ -21,10 +21,12 @@ import { BinanceModule } from './binance/binance.module';
       useFactory: (configService: ConfigService) => ({
         token: configService.get('TELEGRAM_BOT_TOKEN'),
         include: [],
-        launchOptions: {
-          polling: true,
-          allowedUpdates: ['message', 'callback_query', 'inline_query', 'chat_member'],
-        },
+        launchOptions: process.env.VERCEL ? 
+          { webhook: { domain: process.env.VERCEL_URL, hookPath: '/api/webhook' } } : 
+          {
+            polling: true,
+            allowedUpdates: ['message', 'callback_query', 'inline_query', 'chat_member'],
+          },
         middlewares: [
           // Bu middleware tüm mesajları yazarak debug etmemize yardımcı olacak
           async (ctx, next) => {

@@ -45,7 +45,16 @@ async function bootstrap() {
     logger.error(`Bot komutları ayarlanırken hata: ${e.message}`);
   }
   
-  await app.listen(3000);
-  logger.log('Bot başlatıldı ve dinleniyor, port: 3000');
+  // Vercel serverless ortamında çalışırken port dinlemeyi atla
+  if (!process.env.VERCEL) {
+    await app.listen(process.env.PORT || 3000);
+    logger.log(`Bot başlatıldı ve dinleniyor, port: ${process.env.PORT || 3000}`);
+  } else {
+    logger.log('Bot Vercel serverless ortamında başlatıldı');
+  }
 }
-bootstrap(); 
+
+// Vercel serverless ortamı değilse bootstrap'i çalıştır
+if (!process.env.VERCEL) {
+  bootstrap();
+} 
