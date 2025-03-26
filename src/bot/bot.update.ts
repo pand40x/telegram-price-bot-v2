@@ -6,6 +6,7 @@ import { PriceService } from '../price/price.service';
 import { SymbolService, SymbolSearchResult } from '../symbol/symbol.service';
 import { BinanceService } from '../binance/binance.service';
 import { AlertService } from '../alert/alert.service';
+import { AssetPrice } from '../price/interfaces/price.interface';
 
 @Update()
 @Injectable()
@@ -44,34 +45,178 @@ export class BotUpdate implements OnModuleInit {
       }
     });
 
-    this.bot.command('alertadd', async (ctx) => {
-      console.log('ALERTADD KOMUTU ÇALIŞTIRILDI!');
+    this.bot.command('alertsadd', async (ctx) => {
+      console.log('ALERTSADD KOMUTU ÇALIŞTIRILDI!');
       try {
         if (!ctx.message) return;
         
         const chatId = ctx.message.chat.id.toString();
         const messageText = (ctx.message as any)?.text || '';
         
-        // Komutu parçalara ayır (/alertadd liste_adı sembol)
-        const parts = messageText.split(' ');
+        // Komutu parçalara ayır (/alertsadd liste_adı sembol)
+        const parts = messageText.split(' ').filter(p => p.trim() !== '');
         
-        if (parts.length < 3) {
+        // Eğer sadece komut varsa (parametre yoksa) veya çok az parametre varsa
+        if (parts.length < 2) {
           await ctx.reply(
             'Lütfen bir liste adı ve en az bir sembol belirtin.\n' +
-            'Örnek: /alertadd kripto BTC\n' +
-            'Çoklu sembol: /alertadd kripto BTC ETH PEPE\n' +
-            'Farklı eşikler: /alertadd kripto BTC 1 ETH 3 PEPE 5'
+            'Örnek: /alertsadd kripto BTC\n' +
+            'Çoklu sembol: /alertsadd kripto BTC ETH PEPE\n' +
+            'Farklı eşikler: /alertsadd kripto BTC 1 ETH 3 PEPE 5'
           );
           return;
         }
         
-        const listName = parts[1];
-        const remainingParts = parts.slice(2);
+        // Liste adı eksik olabilir mi? İlk parametrenin sembol olup olmadığını kontrol et
+        const firstParam = parts[1].toUpperCase();
         
+        // Yaygın kripto, hisse senedi sembolleri ve diğer sembol formatları
+        const cryptoSymbols = ['BTC', 'ETH', 'XRP', 'SOL', 'DOT', 'ADA', 'AVAX', 'DOGE', 'PEPE', 'SHIB', 'BNB', 'MATIC'];
+        const stockSymbols = [
+          // Türk hisseleri - BIST
+          'THYAO', 'ASELS', 'KCHOL', 'SISE', 'GARAN', 'AKBNK', 'TUPRS', 'BIMAS', 'FROTO', 'EREGL', 'YKBNK',
+          'PGSUS', 'TAVHL', 'TCELL', 'SAHOL', 'HEKTS', 'VESTL', 'TTKOM', 'DOHOL', 'KRDMD', 'PETKM', 
+          'EKGYO', 'TOASO', 'SASA', 'ARCLK', 'KOZAA', 'KOZAL', 'MAVI', 'ISCTR', 'ODAS', 'ALFAS',
+          // Yabancı hisseler
+          'AAPL', 'MSFT', 'AMZN', 'GOOG', 'META', 'TSLA', 'NVDA', 'JPM', 'V', 'WMT', 'JNJ', 'PG', 'BABA',
+          'XOM', 'DIS', 'NFLX', 'UBER', 'INTC', 'IBM', 'F', 'GM', 'AMD', 'MCD', 'KO', 'PEP', 'NKE'
+        ];
+        const isStockFormat = firstParam.includes('.') || firstParam.includes('-') || /XU\d+/.test(firstParam);
+        
+        // İlk parametre bir sembol olabilir mi?
+        const firstParamIsSymbol = cryptoSymbols.includes(firstParam) || 
+                                   stockSymbols.includes(firstParam) || 
+                                   isStockFormat || 
+                                   /^[A-Z0-9]{1,10}$/.test(firstParam);
+        
+        // İlk parametre sayı değil ve sembol formatına uygun mu?
+        const isFirstParamPossiblySymbol = isNaN(parseFloat(firstParam)) && firstParamIsSymbol;
+        
+        // İkinci parametre sayı mı? (eşik değeri olabilir)
+        const secondParamIsPossiblyThreshold = parts.length > 2 && !isNaN(parseFloat(parts[2]));
+        
+        // Listenin zaten var olup olmadığını kontrol etmek için mevcut listeleri al
+        const userAlertLists = await this.alertService.getUserAlertLists(chatId);
+        const existingListNames = userAlertLists.map(list => list.listName.toLowerCase());
+        const hasKriptoList = existingListNames.includes('kripto');
+        const hasBorsaList = existingListNames.includes('borsa');
+        
+        let listName: string;
+        let remainingParts: string[];
+        
+        // Liste adı eksik gibi görünüyor mu?
+        if (isFirstParamPossiblySymbol && (parts.length === 2 || secondParamIsPossiblyThreshold)) {
+          // İlk parametre bir sembol gibi görünüyor, liste adı eksik
+          
+          // Sembol tipine göre önerilen liste
+          const isStock = stockSymbols.includes(firstParam) || isStockFormat;
+          const suggestedListName = isStock ? 'borsa' : 'kripto';
+          
+          // Kullanıcıya hata ve öneri mesajı
+          const suggestionButtons = [];
+          
+          // "kripto" veya "borsa" listesi zaten varsa, o listeye ekleme seçeneği sun
+          if (isStock && hasBorsaList) {
+            suggestionButtons.push(
+              Markup.button.callback('➕ "borsa" listesine ekle', `add_to_alert_list:borsa:${parts.slice(1).join(',')}:${chatId}`)
+            );
+          } else if (!isStock && hasKriptoList) {
+            suggestionButtons.push(
+              Markup.button.callback('➕ "kripto" listesine ekle', `add_to_alert_list:kripto:${parts.slice(1).join(',')}:${chatId}`)
+            );
+          } else {
+            // Liste yoksa, oluşturma seçeneği sun
+            suggestionButtons.push(
+              Markup.button.callback(`✨ "${suggestedListName}" listesi oluştur`, `create_quick_list:${suggestedListName}:${firstParam}:${chatId}`)
+            );
+          }
+          
+          const keyboard = Markup.inlineKeyboard(suggestionButtons);
+          
+          // Kullanıcıya bilgilendirme mesajı
+          let hintMessage = 'Liste adı eksik görünüyor. ';
+          
+          if (secondParamIsPossiblyThreshold) {
+            hintMessage += `"${firstParam}" için %${parts[2]} eşiği ile uyarı mı oluşturmak istiyorsunuz?`;
+          } else {
+            hintMessage += `"${firstParam}" sembolünü bir uyarı listesine mi eklemek istiyorsunuz?`;
+          }
+          
+          // Sembol tipine göre ek bilgi
+          if (isStock) {
+            hintMessage += `\n\n📈 ${firstParam} bir hisse senedi sembolüne benziyor.`;
+          } else {
+            hintMessage += `\n\n🔹 ${firstParam} bir kripto para sembolüne benziyor.`;
+          }
+          
+          await ctx.reply(hintMessage, keyboard);
+          return;
+        } else {
+          // Normal durum, kullanıcı liste adı belirtmiş
+          listName = parts[1].toLowerCase();
+          remainingParts = parts.slice(2);
+          
+          // Eğer liste adı "kripto" veya "borsa" değilse ve kullanıcı özel bir liste adı kullanmak istiyorsa
+          if (listName !== 'kripto' && listName !== 'borsa' && remainingParts.length > 0) {
+            // İlk sembolü analiz et
+            const firstSymbol = remainingParts[0].toUpperCase();
+            const isStock = stockSymbols.includes(firstSymbol) || isStockFormat;
+            
+            // Sembol tipine göre önerilen standart liste
+            const suggestedListName = isStock ? 'borsa' : 'kripto';
+            
+            // Bu liste zaten var mı?
+            const listExists = await this.alertService.doesAlertListExist(chatId, listName);
+            
+            if (!listExists) {
+              // Önerilen standart liste zaten var mı?
+              const standardListExists = await this.alertService.doesAlertListExist(chatId, suggestedListName);
+              
+              const buttons = [];
+              
+              // Kullanıcının istediği liste adını oluştur seçeneği
+              buttons.push(
+                Markup.button.callback(`✅ "${listName}" listesi oluştur`, `create_quick_list:${listName}:${firstSymbol}:${chatId}`)
+              );
+              
+              // Standart liste önerisi
+              if (standardListExists) {
+                // Standart liste varsa, ona ekleme seçeneği
+                buttons.push(
+                  Markup.button.callback(`➕ "${suggestedListName}" listesine ekle`, `add_to_alert_list:${suggestedListName}:${remainingParts.join(',')}:${chatId}`)
+                );
+              } else {
+                // Standart liste yoksa, onu oluşturma seçeneği
+                buttons.push(
+                  Markup.button.callback(`🔄 "${suggestedListName}" listesi oluştur`, `create_quick_list:${suggestedListName}:${firstSymbol}:${chatId}`)
+                );
+              }
+              
+              const keyboard = Markup.inlineKeyboard(buttons);
+              
+              // Bilgilendirme mesajı
+              let message = `"${listName}" uyarı listesi bulunamadı.\n\n`;
+              
+              // Sembol tipi bilgisi
+              if (isStock) {
+                message += `📈 ${firstSymbol} bir hisse senedi sembolüne benziyor. Standart "borsa" listesini kullanmak isteyebilirsiniz.\n`;
+              } else {
+                message += `🔹 ${firstSymbol} bir kripto para sembolüne benziyor. Standart "kripto" listesini kullanmak isteyebilirsiniz.\n`;
+              }
+              
+              message += `${remainingParts.join(', ')} sembollerini eklemek için seçim yapabilirsiniz:`;
+              
+              await ctx.reply(message, keyboard);
+              return;
+            }
+          }
+        }
+        
+        // Normal işleme devam et (liste adı ve semboller belirtilmiş)
         // Başarıyla eklenen semboller
         const addedSymbols: { symbol: string, threshold: number }[] = [];
         
-        // 1. Senaryo: /alertadd kripto btc 1 pepe 3 eth 5
+        // 1. Senaryo: /alertsadd kripto btc 1 pepe 3 eth 5
         if (remainingParts.length >= 2 && !isNaN(parseFloat(remainingParts[1]))) {
           // Sembol-eşik çiftleri olarak işle
           for (let i = 0; i < remainingParts.length; i += 2) {
@@ -98,7 +243,7 @@ export class BotUpdate implements OnModuleInit {
             }
           }
         } 
-        // 2. Senaryo: /alertadd kripto btc eth pepe
+        // 2. Senaryo: /alertsadd kripto btc eth pepe
         else {
           // Tüm parametreleri sembol olarak kabul et ve varsayılan eşik kullan
           for (const symbolParam of remainingParts) {
@@ -122,10 +267,96 @@ export class BotUpdate implements OnModuleInit {
             `"${listName}" uyarı listesine eklenen semboller:\n\n${symbolInfos.join('\n')}`
           );
         } else {
-          await ctx.reply(`"${listName}" uyarı listesine hiçbir sembol eklenemedi. Liste bulunamadı veya semboller geçersiz.`);
+          // Liste bulunamadı veya semboller eklenemedi
+          // Yeni bir liste oluşturmayı öner
+          
+          // İlk sembole göre türü tahmin et (kripto veya borsa)
+          const firstSymbol = remainingParts[0].toUpperCase();
+          
+          // Sembol tipini belirle - Yaygın borsa kodları için kontrol listesi
+          const stockSymbols = [
+            // Türk hisseleri - BIST
+            'THYAO', 'ASELS', 'KCHOL', 'SISE', 'GARAN', 'AKBNK', 'TUPRS', 'BIMAS', 'FROTO', 'EREGL', 'YKBNK',
+            'PGSUS', 'TAVHL', 'TCELL', 'SAHOL', 'HEKTS', 'VESTL', 'TTKOM', 'DOHOL', 'KRDMD', 'PETKM', 
+            'EKGYO', 'TOASO', 'SASA', 'ARCLK', 'KOZAA', 'KOZAL', 'MAVI', 'ISCTR', 'ODAS', 'ALFAS',
+            // Yabancı hisseler
+            'AAPL', 'MSFT', 'AMZN', 'GOOG', 'META', 'TSLA', 'NVDA', 'JPM', 'V', 'WMT', 'JNJ', 'PG', 'BABA',
+            'XOM', 'DIS', 'NFLX', 'UBER', 'INTC', 'IBM', 'F', 'GM', 'AMD', 'MCD', 'KO', 'PEP', 'NKE'
+          ];
+          
+          // Kripto para birimleri listesi
+          const cryptoSymbols = [
+            'BTC', 'ETH', 'XRP', 'SOL', 'DOT', 'ADA', 'AVAX', 'DOGE', 'PEPE', 'SHIB', 'BNB', 'MATIC', 
+            'LINK', 'LTC', 'DOT', 'UNI', 'ATOM', 'XLM', 'TRX', 'DAI', 'BCH', 'USDC', 'USDT', 'CAKE'
+          ];
+          
+          // Sembol formatına göre tip belirle
+          const isStockByFormat = firstSymbol.includes('.') || firstSymbol.includes('-') || /XU\d+/.test(firstSymbol);
+          
+          // Sembol yaygın borsa veya kripto listelerinde var mı kontrol et
+          const isStock = stockSymbols.includes(firstSymbol) || isStockByFormat;
+          const isCrypto = cryptoSymbols.includes(firstSymbol);
+          
+          // Kullanıcının belirttiği liste adı
+          const specifiedListName = listName.toLowerCase();
+          
+          // Önerilen liste adı - bu sembol için uygun olan liste
+          const suggestedListName = isStock ? 'Borsa' : 'Kripto';
+          
+          // Mevcut listeleri kontrol et
+          const existingLists = await this.symbolService.getUserLists(ctx.from.id.toString());
+          const hasKriptoList = existingLists.some(l => l.listName.toLowerCase() === 'kripto');
+          const hasBorsaList = existingLists.some(l => l.listName.toLowerCase() === 'borsa');
+          
+          // Sembol tipine uygun liste zaten varsa, onu öner
+          let preferredListName = '';
+          if (isStock && hasBorsaList) {
+            preferredListName = 'Borsa';
+          } else if (isCrypto && hasKriptoList) {
+            preferredListName = 'Kripto';
+          }
+          
+          // Butonlar
+          const buttons = [];
+          
+          // Kullanıcının istediği liste adı ile buton ekle
+          buttons.push(
+            Markup.button.callback(`✅ "${listName}" listesi oluştur`, `create_symbol_list:${listName}:${firstSymbol}:${ctx.from.id.toString()}`)
+          );
+          
+          // Eğer önerilen liste adı farklıysa ve mevcut değilse ona da buton ekle
+          if (suggestedListName.toLowerCase() !== listName.toLowerCase()) {
+            buttons.push(
+              Markup.button.callback(`🔄 "${suggestedListName}" listesi oluştur`, `create_symbol_list:${suggestedListName}:${firstSymbol}:${ctx.from.id.toString()}`)
+            );
+          }
+          
+          // Eğer tercih edilen liste varsa, sembolleri ona eklemek için buton ekle
+          if (preferredListName && preferredListName.toLowerCase() !== listName.toLowerCase()) {
+            buttons.push(
+              Markup.button.callback(`➕ "${preferredListName}" listesine ekle`, `add_to_list:${preferredListName}:${remainingParts.join(',')}:${ctx.from.id.toString()}`)
+            );
+          }
+          
+          // Inline klavye oluştur
+          const keyboard = Markup.inlineKeyboard(buttons);
+          
+          let responseMessage = `"${listName}" adında bir listeniz yok.\n\n`;
+          
+          // Sembol tipi bilgisi ekle
+          if (isStock) {
+            responseMessage += `📈 ${firstSymbol} bir hisse senedi sembolüne benziyor.\n`;
+          } else if (isCrypto) {
+            responseMessage += `🔹 ${firstSymbol} bir kripto para sembolüne benziyor.\n`;
+          }
+          
+          responseMessage += `${remainingParts.join(', ')} sembollerini eklemek için önce bir liste oluşturmalısınız.`;
+          
+          await ctx.reply(responseMessage, keyboard);
+          return;
         }
       } catch (error) {
-        console.error('Alertadd komutu hatası:', error);
+        console.error('Alertsadd komutu hatası:', error);
         await ctx.reply('Bir hata oluştu. Lütfen daha sonra tekrar deneyin.');
       }
     });
@@ -212,6 +443,26 @@ export class BotUpdate implements OnModuleInit {
       }
     });
     
+    // Hızlı liste oluşturma callbacklerini tanımla
+    this.bot.action(/create_quick_list:(.+):(.+):(.+)/, async (ctx) => {
+      console.log('HIZLI UYARI LİSTESİ OLUŞTURMA CALLBACK ÇALIŞTIRILDI!');
+      try {
+        await this.handleQuickListCreation(ctx);
+      } catch (error) {
+        console.error('Hızlı liste oluşturma callback hatası:', error);
+      }
+    });
+    
+    // Sembol listesi oluşturma callbacklerini tanımla
+    this.bot.action(/create_symbol_list:(.+):(.+):(.+)/, async (ctx) => {
+      console.log('SEMBOL LİSTESİ OLUŞTURMA CALLBACK ÇALIŞTIRILDI!');
+      try {
+        await this.handleSymbolListCreation(ctx);
+      } catch (error) {
+        console.error('Sembol listesi oluşturma callback hatası:', error);
+      }
+    });
+    
     // Test komutu
     this.bot.command('ualert', async (ctx) => {
       console.log('UALERT KOMUTU ÇALIŞTIRILDI!');
@@ -289,28 +540,193 @@ export class BotUpdate implements OnModuleInit {
         this.logger.error('Listesil komutu hatası:', error);
       }
     });
+
+    // Yeni eklenen add_to_list callback için handler ekleyelim, bu sayede kullanıcı mevcut bir listeye sembol ekleyebilecek
+    this.bot.action(/add_to_list:(.+):(.+):(.+)/, async (ctx) => {
+      if (!ctx.callbackQuery) return;
+      
+      // Callback verisini parçala
+      const callbackData = (ctx.callbackQuery as any).data;
+      const match = callbackData.match(/add_to_list:(.+):(.+):(.+)/);
+      
+      if (!match || match.length < 4) {
+        await ctx.answerCbQuery('İşlem yapılamadı');
+        return;
+      }
+      
+      const listName = match[1];
+      const symbolsStr = match[2];
+      const userId = match[3];
+      
+      try {
+        // Virgülle ayrılmış sembolleri diziye çevir
+        const symbols = symbolsStr.split(',');
+        
+        if (symbols.length === 0) {
+          await ctx.editMessageText(`Eklenecek sembol bulunamadı.`);
+          await ctx.answerCbQuery('İşlem iptal edildi');
+          return;
+        }
+        
+        // Liste var mı kontrol et
+        const list = await this.symbolService.getListDetails(userId, listName);
+        
+        if (!list) {
+          await ctx.editMessageText(`"${listName}" listesi bulunamadı.`);
+          await ctx.answerCbQuery('Liste bulunamadı');
+          return;
+        }
+        
+        // Tüm sembolleri eklemeyi dene
+        const results: {symbol: string, success: boolean}[] = [];
+        
+        for (const symbol of symbols) {
+          const success = await this.symbolService.addSymbolToList(userId, listName, symbol);
+          results.push({ symbol, success });
+        }
+        
+        // Sonuçları kategorilere ayır
+        const added = results.filter(r => r.success).map(r => r.symbol);
+        const failed = results.filter(r => !r.success).map(r => r.symbol);
+        
+        // Cevap mesajını hazırla
+        let responseMessage = `"${listName}" listesi işlemi:\n\n`;
+        
+        if (added.length > 0) {
+          responseMessage += `✅ Eklenen semboller: ${added.join(', ')}\n`;
+        }
+        
+        if (failed.length > 0) {
+          responseMessage += `❌ Eklenemeyen semboller: ${failed.join(', ')}\n`;
+          responseMessage += 'Not: Bazı semboller zaten listede olabilir.\n';
+        }
+        
+        responseMessage += `\n• Listeyi görüntülemek için: /liste ${listName}`;
+        
+        await ctx.editMessageText(responseMessage);
+        await ctx.answerCbQuery(added.length > 0 ? 'Semboller eklendi' : 'İşlem tamamlandı');
+      } catch (error) {
+        this.logger.error(`Mevcut listeye ekleme hatası: ${error.message}`);
+        await ctx.editMessageText('Bir hata oluştu. Lütfen daha sonra tekrar deneyin.');
+        await ctx.answerCbQuery('İşlem başarısız');
+      }
+    });
+
+    this.bot.action(/add_to_alert_list:(.+):(.+):(.+)/, async (ctx) => {
+      if (!ctx.callbackQuery) return;
+      
+      // Callback verisini parçala
+      const callbackData = (ctx.callbackQuery as any).data;
+      const match = callbackData.match(/add_to_alert_list:(.+):(.+):(.+)/);
+      
+      if (!match || match.length < 4) {
+        await ctx.answerCbQuery('İşlem yapılamadı');
+        return;
+      }
+      
+      const listName = match[1];
+      const symbolsStr = match[2];
+      const chatId = match[3];
+      
+      try {
+        // Virgülle ayrılmış sembolleri diziye çevir
+        const allParams = symbolsStr.split(',');
+        const results: { symbol: string, threshold: number, success: boolean }[] = [];
+        
+        // Parametreleri sembol-eşik çiftleri olarak işleme
+        for (let i = 0; i < allParams.length; i++) {
+          const symbol = allParams[i].toUpperCase();
+          let threshold = 5; // Varsayılan eşik
+          
+          // Sonraki parametre sayı ise, eşik değeri olarak kabul et
+          if (i + 1 < allParams.length && !isNaN(parseFloat(allParams[i + 1]))) {
+            threshold = parseFloat(allParams[i + 1]);
+            i++; // Eşik değerini atla
+          }
+          
+          // Sembolü ekle
+          const success = await this.alertService.addSymbolToAlertList(
+            chatId,
+            listName,
+            symbol,
+            threshold
+          );
+          
+          results.push({ symbol, threshold, success });
+        }
+        
+        // Sonuçları kategorilere ayır
+        const added = results.filter(r => r.success);
+        const failed = results.filter(r => !r.success).map(r => r.symbol);
+        
+        // Cevap mesajını hazırla
+        let responseMessage = `"${listName}" listesi işlemi:\n\n`;
+        
+        if (added.length > 0) {
+          const addedInfo = added.map(item => `✅ ${item.symbol} (Eşik: %${item.threshold})`);
+          responseMessage += addedInfo.join('\n') + '\n\n';
+        }
+        
+        if (failed.length > 0) {
+          responseMessage += `❌ Eklenemeyen semboller: ${failed.join(', ')}\n`;
+          responseMessage += 'Not: Bazı semboller zaten listede olabilir.\n\n';
+        }
+        
+        responseMessage += `• Listeyi görüntülemek için: /alerts ${listName}\n`;
+        responseMessage += `• Daha fazla sembol eklemek için: /alertsadd ${listName} <sembol>`;
+        
+        await ctx.editMessageText(responseMessage);
+        await ctx.answerCbQuery(added.length > 0 ? 'Semboller eklendi' : 'İşlem tamamlandı');
+      } catch (error) {
+        this.logger.error(`Uyarı listesine ekleme hatası: ${error.message}`);
+        await ctx.editMessageText('Bir hata oluştu. Lütfen daha sonra tekrar deneyin.');
+        await ctx.answerCbQuery('İşlem başarısız');
+      }
+    });
   }
 
   /**
    * Bot başlangıç metodu
    */
   async onModuleInit() {
+    // Bot başlatıldığında komutları ayarla
+    await this.bot.telegram.setMyCommands([
+      { command: 'start', description: 'Botu başlat ve bilgi al' },
+      { command: 'help', description: 'Yardım' },
+      { command: 'fiyat', description: 'Kripto para veya hisse senedi fiyatı göster' },
+      { command: 'asagi', description: 'Günlük en çok düşen kriptolar' },
+      { command: 'yukari', description: 'Günlük en çok yükselen kriptolar' },
+      { command: 'liste', description: 'Sembol listelerini göster veya yönet' },
+      { command: 'ekle', description: 'Sembolleri listeye ekle' },
+      { command: 'cikar', description: 'Sembolleri listeden çıkar' },
+      { command: 'alerts', description: 'Fiyat uyarı listelerini göster veya yönet' },
+      { command: 'alertsadd', description: 'Sembol uyarı listesine ekle' },
+      { command: 'alertsremove', description: 'Sembol uyarı listesinden çıkar' },
+      { command: 'data', description: 'Veritabanına sembol ekle (admin)' },
+      { command: 'p', description: 'Belirtilen sembolün fiyatını tekrarlı göster (eğlence)' },
+    ]);
+    
+    this.logger.log('Bot başlatıldı ve komut listesi ayarlandı');
+    
     const botInfo = await this.bot.telegram.getMe();
     this.logger.log(`Bot başlatıldı! @${botInfo.username} adıyla çalışıyor.`);
     
     // Komutları tanımla - gruplar için
     try {
       const commands = [
-        { command: 'l', description: 'Yeni liste oluştur' },
-        { command: 'liste', description: 'Yeni liste oluştur' },
-        { command: 'ekle', description: 'Listeye sembol ekle' },
-        { command: 'add', description: 'Listeye sembol ekle' },
+        { command: 'kripto', description: 'Kripto para fiyatlarını göster' },
+        { command: 'hisse', description: 'Hisse senedi fiyatlarını göster' },
+        { command: 'alerts', description: 'Uyarı listeleri yönetimi' },
+        { command: 'alertsadd', description: 'Uyarı listesine sembol ekle' },
+        { command: 'alertremove', description: 'Uyarı listesinden sembol çıkar' },
+        { command: 'alertrmv', description: 'alertremove komutunun kısaltması' },
+        { command: 'liste', description: 'Sembol listeleri yönetimi' },
+        { command: 'ekle', description: 'Liste oluştur veya sembolleri ekle' },
         { command: 'cikar', description: 'Listeden sembol çıkar' },
         { command: 'listeler', description: 'Tüm listeleri göster' },
         { command: 'lists', description: 'Tüm listeleri göster' },
         { command: 'listedetay', description: 'Liste detaylarını göster' },
         { command: 'fiyat', description: 'Fiyat göster' },
-        { command: 'alerts', description: 'Uyarı listelerini göster' },
         { command: 'help', description: 'Yardım' },
         { command: 'start', description: 'Bot başlat' }
       ];
@@ -325,6 +741,195 @@ export class BotUpdate implements OnModuleInit {
     } catch (e) {
       this.logger.error('Bot komutları ayarlanırken hata:', e);
     }
+    
+    // Data komutunu tanımla
+    this.bot.command('data', async (ctx) => {
+      try {
+        if (!ctx.message) return;
+        
+        const chatId = ctx.message.chat.id.toString();
+        const userId = (ctx.message as any).from.id.toString();
+        const messageText = (ctx.message as any)?.text || '';
+        const parts = messageText.split(' ').filter(p => p.trim() !== '');
+        
+        // İşlem gönderen kişinin ID'sini debug için logla
+        this.logger.log(`Data komutunu kullanan kullanıcı: chatId=${chatId}, userId=${userId}`);
+        this.logger.log(`Mevcut admin listesi: ${process.env.ADMIN_USERS}`);
+        
+        // Admin kontrolü - hem userId hem de chatId kontrolü yapalım 
+        const adminUsers = process.env.ADMIN_USERS ? process.env.ADMIN_USERS.split(',') : [];
+        const isAdmin = adminUsers.includes(userId) || adminUsers.includes(chatId);
+        
+        if (!isAdmin) {
+          this.logger.log(`Admin olmayan kullanıcı: ${userId}`);
+          await ctx.reply('Bu komut sadece bot yöneticileri tarafından kullanılabilir.');
+          return;
+        }
+        
+        // Admin doğrulandı, işleme devam et
+        this.logger.log(`Admin doğrulandı: ${userId}, işleme devam ediliyor...`);
+        
+        // Yeterli parametre var mı? (/data [borsa|kripto] symbol1 symbol2...)
+        if (parts.length < 3) {
+          await ctx.reply(
+            'Veritabanına sembol eklemek için komut formatı:\n' +
+            '/data borsa SYMBOL1 SYMBOL2 ... (Hisse senetleri için)\n' +
+            '/data kripto SYMBOL1 SYMBOL2 ... (Kripto paralar için)\n' +
+            'Örnek: /data borsa THYAO ASELS SASA\n' +
+            'Örnek: /data kripto BTC ETH SOL'
+          );
+          return;
+        }
+        
+        const dataType = parts[1].toLowerCase();
+        
+        // Geçerli veri tipi kontrolü
+        if (dataType !== 'borsa' && dataType !== 'kripto') {
+          await ctx.reply('Lütfen geçerli bir veri tipi belirtin: "borsa" veya "kripto"');
+          return;
+        }
+        
+        // Sembolleri temizle ve büyük harfe çevir
+        const symbols = parts.slice(2).map(s => s.trim().toUpperCase());
+        
+        if (symbols.length === 0) {
+          await ctx.reply('Lütfen en az bir sembol belirtin.');
+          return;
+        }
+        
+        this.logger.log(`İşlenecek semboller: ${symbols.join(', ')}`);
+        
+        // Başarılı ve başarısız eklemeleri takip et
+        const results: { symbol: string, success: boolean, reason?: string }[] = [];
+        
+        // Sembollerin her birini veritabanına ekle
+        for (const symbol of symbols) {
+          try {
+            // Sembol türünü belirle
+            const symbolType = dataType === 'borsa' ? 'stock' : 'crypto';
+            
+            // Sembol adını oluştur (varsayılan)
+            const symbolName = `${symbol} ${symbolType === 'stock' ? 'Hisse Senedi' : 'Kripto Para'}`;
+            
+            // Sembol verisi oluştur
+            const symbolData = {
+              symbol,
+              type: symbolType as 'stock' | 'crypto',
+              name: symbolName,
+              aliases: [symbol.toLowerCase()], // Alternatif isimler eklenebilir
+              popularity: 50 // Orta düzey popülerlik
+            };
+            
+            // Veritabanına ekle
+            await this.symbolService.addOrUpdateSymbol(symbolData);
+            
+            results.push({
+              symbol,
+              success: true
+            });
+            
+            this.logger.log(`Sembol başarıyla eklendi: ${symbol}`);
+          } catch (error) {
+            this.logger.error(`Sembol ekleme hatası (${symbol}): ${error.message}`);
+            
+            results.push({
+              symbol,
+              success: false,
+              reason: error.message
+            });
+          }
+        }
+        
+        // Sonuç mesajını oluştur
+        const successSymbols = results.filter(r => r.success).map(r => r.symbol);
+        const failedSymbols = results.filter(r => !r.success).map(r => r.symbol);
+        
+        let responseMessage = `📊 Veritabanı Güncelleme Sonucu (${dataType.toUpperCase()}):\n\n`;
+        
+        if (successSymbols.length > 0) {
+          responseMessage += `✅ Başarıyla eklenen semboller (${successSymbols.length}):\n${successSymbols.join(', ')}\n\n`;
+        }
+        
+        if (failedSymbols.length > 0) {
+          responseMessage += `❌ Eklenemeyen semboller (${failedSymbols.length}):\n${failedSymbols.join(', ')}`;
+        }
+        
+        this.logger.log(`İşlem tamamlandı, cevap gönderiliyor: ${responseMessage}`);
+        
+        await ctx.reply(responseMessage);
+        
+      } catch (error) {
+        this.logger.error(`Data komut hatası: ${error.message}`, error.stack);
+        await ctx.reply('Bir hata oluştu. Lütfen daha sonra tekrar deneyin.');
+      }
+    });
+    
+    // Tekrarlı fiyat komutu
+    this.bot.command('p', async (ctx) => {
+      try {
+        if (!ctx.message) return;
+        
+        const messageText = (ctx.message as any)?.text || '';
+        const parts = messageText.split(' ').filter(p => p.trim() !== '');
+        
+        // Komut formatını kontrol et
+        if (parts.length < 2) {
+          await ctx.reply(
+            'Lütfen en az bir sembol belirtin.\n' +
+            'Örnek: /p BTC\n' +
+            'Tekrarlı gösterim için: /p BTC 5'
+          );
+          return;
+        }
+        
+        // Sembol ve tekrar sayısını al
+        const symbol = parts[1].toUpperCase();
+        
+        // Varsayılan olarak 1 kez göster, ikinci parametre varsa ve sayı ise o kadar tekrarla
+        let repeatCount = 1;
+        if (parts.length > 2 && !isNaN(parseInt(parts[2]))) {
+          repeatCount = parseInt(parts[2]);
+          
+          // Maksimum tekrar sayısını sınırla (spam önlemi)
+          if (repeatCount > 20) {
+            repeatCount = 20;
+            await ctx.reply('Maksimum 20 kere tekrarlayabilirim 😊');
+          }
+        }
+        
+        // Fiyat bilgisi al
+        const prices = await this.priceService.getPrices([symbol]);
+        
+        if (prices.length === 0) {
+          await ctx.reply(`${symbol} için fiyat bilgisi bulunamadı.`);
+          return;
+        }
+        
+        const price = prices[0];
+        const formattedPrice = this.formatPriceForDisplay(price);
+        
+        // Tekrarlı mesaj oluştur
+        let responseMessage = '';
+        for (let i = 0; i < repeatCount; i++) {
+          responseMessage += `${i+1}. ${formattedPrice}\n`;
+          
+          // Çok uzun mesajları bölmek için
+          if (i > 0 && i % 10 === 0) {
+            await ctx.reply(responseMessage);
+            responseMessage = '';
+          }
+        }
+        
+        // Kalan mesajı gönder
+        if (responseMessage) {
+          await ctx.reply(responseMessage);
+        }
+        
+      } catch (error) {
+        this.logger.error(`Tekrarlı fiyat komut hatası: ${error.message}`);
+        await ctx.reply('Bir hata oluştu. Lütfen daha sonra tekrar deneyin.');
+      }
+    });
   }
 
   @Start()
@@ -355,7 +960,7 @@ export class BotUpdate implements OnModuleInit {
       { cmd: '/ekle', desc: 'Listeye sembol ekle, örn: /ekle liste_adı btc' },
       { cmd: '/cikar', desc: 'Listeden sembol çıkar, örn: /cikar liste_adı btc' },
       { cmd: '/alerts', desc: 'Fiyat uyarı listelerini görüntüle ve yönet' },
-      { cmd: '/alertadd', desc: 'Uyarı listesine sembol ekle, örn: /alertadd liste_adı btc 5' },
+      { cmd: '/alertsadd', desc: 'Uyarı listesine sembol ekle, örn: /alertsadd liste_adı btc 5' },
       { cmd: '/alertremove', desc: 'Uyarı listesinden sembol çıkar, örn: /alertremove liste_adı btc' },
     ];
 
@@ -689,7 +1294,89 @@ export class BotUpdate implements OnModuleInit {
       // Liste var mı kontrol et
       const list = await this.symbolService.getListDetails(userId, listName);
       if (!list) {
-        await ctx.reply(`"${listName}" adında bir listeniz yok. Önce listeyi oluşturun:\n/liste yeni ${listName}`);
+        // İlk sembole göre türü tahmin et
+        const firstSymbol = symbols[0].toUpperCase();
+        
+        // Yaygın borsa kodları için kontrol listesi
+        const stockSymbols = [
+          // Türk hisseleri - BIST
+          'THYAO', 'ASELS', 'KCHOL', 'SISE', 'GARAN', 'AKBNK', 'TUPRS', 'BIMAS', 'FROTO', 'EREGL', 'YKBNK',
+          'PGSUS', 'TAVHL', 'TCELL', 'SAHOL', 'HEKTS', 'VESTL', 'TTKOM', 'DOHOL', 'KRDMD', 'PETKM', 
+          'EKGYO', 'TOASO', 'SASA', 'ARCLK', 'KOZAA', 'KOZAL', 'MAVI', 'ISCTR', 'ODAS', 'ALFAS',
+          // Yabancı hisseler
+          'AAPL', 'MSFT', 'AMZN', 'GOOG', 'META', 'TSLA', 'NVDA', 'JPM', 'V', 'WMT', 'JNJ', 'PG', 'BABA',
+          'XOM', 'DIS', 'NFLX', 'UBER', 'INTC', 'IBM', 'F', 'GM', 'AMD', 'MCD', 'KO', 'PEP', 'NKE'
+        ];
+        
+        // Kripto para birimleri listesi
+        const cryptoSymbols = [
+          'BTC', 'ETH', 'XRP', 'SOL', 'DOT', 'ADA', 'AVAX', 'DOGE', 'PEPE', 'SHIB', 'BNB', 'MATIC', 
+          'LINK', 'LTC', 'DOT', 'UNI', 'ATOM', 'XLM', 'TRX', 'DAI', 'BCH', 'USDC', 'USDT', 'CAKE'
+        ];
+        
+        // Sembol formatına göre tip belirle
+        const isStockByFormat = firstSymbol.includes('.') || firstSymbol.includes('-') || /XU\d+/.test(firstSymbol);
+        
+        // Sembol yaygın borsa veya kripto listelerinde var mı kontrol et
+        const isStock = stockSymbols.includes(firstSymbol) || isStockByFormat;
+        const isCrypto = cryptoSymbols.includes(firstSymbol);
+        
+        // Kullanıcının belirttiği liste adı
+        const specifiedListName = listName.toLowerCase();
+        
+        // Önerilen liste adı - bu sembol için uygun olan liste
+        const suggestedListName = isStock ? 'Borsa' : 'Kripto';
+        
+        // Mevcut listeleri kontrol et
+        const existingLists = await this.symbolService.getUserLists(ctx.from.id.toString());
+        const hasKriptoList = existingLists.some(l => l.listName.toLowerCase() === 'kripto');
+        const hasBorsaList = existingLists.some(l => l.listName.toLowerCase() === 'borsa');
+        
+        // Sembol tipine uygun liste zaten varsa, onu öner
+        let preferredListName = '';
+        if (isStock && hasBorsaList) {
+          preferredListName = 'Borsa';
+        } else if (isCrypto && hasKriptoList) {
+          preferredListName = 'Kripto';
+        }
+        
+        // Butonlar
+        const buttons = [];
+        
+        // Kullanıcının istediği liste adı ile buton ekle
+        buttons.push(
+          Markup.button.callback(`✅ "${listName}" listesi oluştur`, `create_symbol_list:${listName}:${firstSymbol}:${ctx.from.id.toString()}`)
+        );
+        
+        // Eğer önerilen liste adı farklıysa ve mevcut değilse ona da buton ekle
+        if (suggestedListName.toLowerCase() !== listName.toLowerCase()) {
+          buttons.push(
+            Markup.button.callback(`🔄 "${suggestedListName}" listesi oluştur`, `create_symbol_list:${suggestedListName}:${firstSymbol}:${ctx.from.id.toString()}`)
+          );
+        }
+        
+        // Eğer tercih edilen liste varsa, sembolleri ona eklemek için buton ekle
+        if (preferredListName && preferredListName.toLowerCase() !== listName.toLowerCase()) {
+          buttons.push(
+            Markup.button.callback(`➕ "${preferredListName}" listesine ekle`, `add_to_list:${preferredListName}:${symbols.join(',')}:${ctx.from.id.toString()}`)
+          );
+        }
+        
+        // Inline klavye oluştur
+        const keyboard = Markup.inlineKeyboard(buttons);
+        
+        let responseMessage = `"${listName}" adında bir listeniz yok.\n\n`;
+        
+        // Sembol tipi bilgisi ekle
+        if (isStock) {
+          responseMessage += `📈 ${firstSymbol} bir hisse senedi sembolüne benziyor.\n`;
+        } else if (isCrypto) {
+          responseMessage += `🔹 ${firstSymbol} bir kripto para sembolüne benziyor.\n`;
+        }
+        
+        responseMessage += `${symbols.join(', ')} sembollerini eklemek için önce bir liste oluşturmalısınız.`;
+        
+        await ctx.reply(responseMessage, keyboard);
         return;
       }
       
@@ -991,9 +1678,9 @@ export class BotUpdate implements OnModuleInit {
         
         if (success) {
           await ctx.reply(
-            `"${listName}" uyarı listesi oluşturuldu.\n\n` +
-            `Listeye sembol eklemek için: /alertadd ${listName} <sembol>\n` +
-            `Örnek: /alertadd ${listName} BTC`
+            `✅ "${listName}" uyarı listesi oluşturuldu.\n\n` +
+            `Listeye sembol eklemek için: /alertsadd ${listName} <sembol>\n` +
+            `Örnek: /alertsadd ${listName} ${listName === 'kripto' ? 'BTC ETH' : 'THYAO ASELS'}`
           );
         } else {
           await ctx.reply(`"${listName}" uyarı listesi oluşturulamadı. Bu isimde bir liste zaten var olabilir.`);
@@ -1037,7 +1724,7 @@ export class BotUpdate implements OnModuleInit {
       }
       
       // Liste detaylarını göster
-      const listName = parts.slice(1).join(' ');
+      const listName = parts.slice(1).join(' ').toLowerCase();
       const details = await this.alertService.getAlertListDetails(chatId, listName);
       
       if (!details) {
@@ -1051,14 +1738,18 @@ export class BotUpdate implements OnModuleInit {
           `"${listName}" uyarı listesi boş.\n\n` +
           `Durum: ${details.isActive ? '🟢 Aktif' : '🔴 Pasif'}\n` +
           `Varsayılan fiyat değişim eşiği: %${details.percentChangeThreshold}\n\n` +
-          `Listeye sembol eklemek için: /alertadd ${listName} <sembol>\n` +
-          `Örnek: /alertadd ${listName} BTC`
+          `Listeye sembol eklemek için: /alertsadd ${listName} <sembol>\n` +
+          `Örnek: /alertsadd ${listName} ${listName === 'borsa' ? 'THYAO' : 'BTC'}`
         );
         return;
       }
       
-      // Listedeki semboller için fiyat bilgilerini al
-      const prices = await this.priceService.getPrices(details.symbols, 'crypto');
+      // Liste adına göre asset tipini belirle
+      const assetType = listName === 'borsa' ? 'stock' : 'crypto';
+      this.logger.debug(`"${listName}" uyarı listesi için '${assetType}' tipi kullanılıyor`);
+      
+      // Listedeki semboller için fiyat bilgilerini al - liste adına göre tip belirle
+      const prices = await this.priceService.getPrices(details.symbols, assetType);
       
       // Her sembol için eşik değerleri ve fiyat bilgilerini hazırla
       const formattedInfos = prices.map(price => {
@@ -1125,5 +1816,334 @@ export class BotUpdate implements OnModuleInit {
     }
     
     await ctx.answerCbQuery();
+  }
+
+  @Action(/create_quick_list:(.+):(.+):(.+)/)
+  async handleQuickListCreation(@Ctx() ctx: Context) {
+    if (!ctx.callbackQuery) return;
+    
+    // Callback verisini parçala
+    const callbackData = (ctx.callbackQuery as any).data;
+    const match = callbackData.match(/create_quick_list:(.+):(.+):(.+)/);
+    
+    if (!match || match.length < 4) {
+      await ctx.answerCbQuery('İşlem yapılamadı');
+      return;
+    }
+    
+    const listName = match[1];
+    const symbol = match[2];
+    const chatId = match[3];
+    
+    try {
+      // Önce liste var mı kontrol et
+      const listExists = await this.alertService.doesAlertListExist(chatId, listName);
+      
+      if (listExists) {
+        // Liste zaten varsa, doğrudan sembolü ekle
+        this.logger.debug(`"${listName}" listesi zaten var, sembol eklemeye çalışılıyor`);
+        const symbolAdded = await this.alertService.addSymbolToAlertList(
+          chatId,
+          listName,
+          symbol,
+          5 // Varsayılan eşik
+        );
+        
+        if (symbolAdded) {
+          await ctx.editMessageText(
+            `✅ "${symbol}" sembolü mevcut "${listName}" listesine eklendi!\n\n` +
+            `• Listeyi görüntülemek için: /alerts ${listName}\n` +
+            `• Fiyat değişim eşiği: %5\n` +
+            `• Daha fazla sembol eklemek için: /alertsadd ${listName} <sembol1> <sembol2> ...`
+          );
+        } else {
+          await ctx.editMessageText(
+            `❌ "${symbol}" sembolü "${listName}" listesine eklenemedi.\n` +
+            `Bu sembol zaten listede olabilir.`
+          );
+        }
+        
+        await ctx.answerCbQuery(`Sembol listeye eklendi`);
+        return;
+      }
+      
+      // Liste yoksa yeni oluştur
+      const listCreated = await this.alertService.createAlertList(chatId, listName);
+      
+      if (!listCreated) {
+        await ctx.editMessageText(
+          `❗️ "${listName}" listesi oluşturulamadı.\n` +
+          `Lütfen daha sonra tekrar deneyin.`
+        );
+        await ctx.answerCbQuery(`Liste oluşturulamadı`);
+        return;
+      }
+      
+      // Sembolü ekle (varsayılan %5 eşikle)
+      const symbolAdded = await this.alertService.addSymbolToAlertList(
+        chatId,
+        listName,
+        symbol,
+        5 // Varsayılan eşik
+      );
+      
+      if (symbolAdded) {
+        await ctx.editMessageText(
+          `✅ "${listName}" listesi oluşturuldu ve "${symbol}" sembolü eklendi!\n\n` +
+          `• Listeyi görüntülemek için: /alerts ${listName}\n` +
+          `• Fiyat değişim eşiği: %5\n` +
+          `• Daha fazla sembol eklemek için: /alertsadd ${listName} <sembol1> <sembol2> ...`
+        );
+      } else {
+        await ctx.editMessageText(
+          `✅ "${listName}" listesi oluşturuldu, fakat "${symbol}" sembolü eklenemedi.\n` +
+          `Sembol eklemek için: /alertsadd ${listName} ${symbol}`
+        );
+      }
+      
+      await ctx.answerCbQuery(`Liste oluşturuldu`);
+    } catch (error) {
+      this.logger.error(`Hızlı liste oluşturma hatası: ${error.message}`);
+      await ctx.editMessageText('Bir hata oluştu. Lütfen daha sonra tekrar deneyin.');
+      await ctx.answerCbQuery('İşlem başarısız');
+    }
+  }
+
+  @Action(/create_symbol_list:(.+):(.+):(.+)/)
+  async handleSymbolListCreation(@Ctx() ctx: Context) {
+    if (!ctx.callbackQuery) return;
+    
+    // Callback verisini parçala
+    const callbackData = (ctx.callbackQuery as any).data;
+    const match = callbackData.match(/create_symbol_list:(.+):(.+):(.+)/);
+    
+    if (!match || match.length < 4) {
+      await ctx.answerCbQuery('İşlem yapılamadı');
+      return;
+    }
+    
+    const listName = match[1];
+    const symbol = match[2];
+    const userId = match[3];
+    
+    try {
+      // Önce liste var mı kontrol et
+      const list = await this.symbolService.getListDetails(userId, listName);
+      
+      if (list) {
+        // Liste zaten varsa, doğrudan sembolü ekle
+        this.logger.debug(`"${listName}" listesi zaten var, sembol eklemeye çalışılıyor`);
+        const symbolAdded = await this.symbolService.addSymbolToList(userId, listName, symbol);
+        
+        if (symbolAdded) {
+          await ctx.editMessageText(
+            `✅ "${symbol}" sembolü mevcut "${listName}" listesine eklendi!\n\n` +
+            `• Listeyi görüntülemek için: /liste ${listName}\n` +
+            `• Daha fazla sembol eklemek için: /ekle ${listName} <sembol1> <sembol2> ...`
+          );
+        } else {
+          await ctx.editMessageText(
+            `❌ "${symbol}" sembolü "${listName}" listesine eklenemedi.\n` +
+            `Bu sembol zaten listede olabilir.`
+          );
+        }
+        
+        await ctx.answerCbQuery(`Sembol listeye eklendi`);
+        return;
+      }
+      
+      // Liste yoksa yeni oluştur
+      const listCreated = await this.symbolService.createUserList(userId, listName);
+      
+      if (!listCreated) {
+        await ctx.editMessageText(
+          `❗️ "${listName}" listesi oluşturulamadı.\n` +
+          `Lütfen daha sonra tekrar deneyin.`
+        );
+        await ctx.answerCbQuery(`Liste oluşturulamadı`);
+        return;
+      }
+      
+      // Sembolü ekle
+      const symbolAdded = await this.symbolService.addSymbolToList(userId, listName, symbol);
+      
+      if (symbolAdded) {
+        await ctx.editMessageText(
+          `✅ "${listName}" listesi oluşturuldu ve "${symbol}" sembolü eklendi!\n\n` +
+          `• Listeyi görüntülemek için: /liste ${listName}\n` +
+          `• Daha fazla sembol eklemek için: /ekle ${listName} <sembol1> <sembol2> ...`
+        );
+      } else {
+        await ctx.editMessageText(
+          `✅ "${listName}" listesi oluşturuldu, fakat "${symbol}" sembolü eklenemedi.\n` +
+          `Sembol eklemek için: /ekle ${listName} ${symbol}`
+        );
+      }
+      
+      await ctx.answerCbQuery(`Liste oluşturuldu`);
+    } catch (error) {
+      this.logger.error(`Sembol listesi oluşturma hatası: ${error.message}`);
+      await ctx.editMessageText('Bir hata oluştu. Lütfen daha sonra tekrar deneyin.');
+      await ctx.answerCbQuery('İşlem başarısız');
+    }
+  }
+
+  // Data komutunu ekle
+  @Command('data')
+  async handleDataCommand(@Ctx() ctx: Context) {
+    try {
+      if (!ctx.message) return;
+      
+      const chatId = ctx.message.chat.id.toString();
+      const userId = (ctx.message as any).from.id.toString();
+      const messageText = (ctx.message as any)?.text || '';
+      const parts = messageText.split(' ').filter(p => p.trim() !== '');
+      
+      // İşlem gönderen kişinin ID'sini debug için logla
+      this.logger.log(`Data komutunu kullanan kullanıcı: chatId=${chatId}, userId=${userId}`);
+      this.logger.log(`Mevcut admin listesi: ${process.env.ADMIN_USERS}`);
+      
+      // Admin kontrolü - hem userId hem de chatId kontrolü yapalım 
+      const adminUsers = process.env.ADMIN_USERS ? process.env.ADMIN_USERS.split(',') : [];
+      const isAdmin = adminUsers.includes(userId) || adminUsers.includes(chatId);
+      
+      if (!isAdmin) {
+        this.logger.log(`Admin olmayan kullanıcı: ${userId}`);
+        await ctx.reply('Bu komut sadece bot yöneticileri tarafından kullanılabilir.');
+        return;
+      }
+      
+      // Admin doğrulandı, işleme devam et
+      this.logger.log(`Admin doğrulandı: ${userId}, işleme devam ediliyor...`);
+      
+      // Yeterli parametre var mı? (/data [borsa|kripto] symbol1 symbol2...)
+      if (parts.length < 3) {
+        await ctx.reply(
+          'Veritabanına sembol eklemek için komut formatı:\n' +
+          '/data borsa SYMBOL1 SYMBOL2 ... (Hisse senetleri için)\n' +
+          '/data kripto SYMBOL1 SYMBOL2 ... (Kripto paralar için)\n' +
+          'Örnek: /data borsa THYAO ASELS SASA\n' +
+          'Örnek: /data kripto BTC ETH SOL'
+        );
+        return;
+      }
+      
+      const dataType = parts[1].toLowerCase();
+      
+      // Geçerli veri tipi kontrolü
+      if (dataType !== 'borsa' && dataType !== 'kripto') {
+        await ctx.reply('Lütfen geçerli bir veri tipi belirtin: "borsa" veya "kripto"');
+        return;
+      }
+      
+      // Sembolleri temizle ve büyük harfe çevir
+      const symbols = parts.slice(2).map(s => s.trim().toUpperCase());
+      
+      if (symbols.length === 0) {
+        await ctx.reply('Lütfen en az bir sembol belirtin.');
+        return;
+      }
+      
+      this.logger.log(`İşlenecek semboller: ${symbols.join(', ')}`);
+      
+      // Başarılı ve başarısız eklemeleri takip et
+      const results: { symbol: string, success: boolean, reason?: string }[] = [];
+      
+      // Sembollerin her birini veritabanına ekle
+      for (const symbol of symbols) {
+        try {
+          // Sembol türünü belirle
+          const symbolType = dataType === 'borsa' ? 'stock' : 'crypto';
+          
+          // Sembol adını oluştur (varsayılan)
+          const symbolName = `${symbol} ${symbolType === 'stock' ? 'Hisse Senedi' : 'Kripto Para'}`;
+          
+          // Sembol verisi oluştur
+          const symbolData = {
+            symbol,
+            type: symbolType as 'stock' | 'crypto',
+            name: symbolName,
+            aliases: [symbol.toLowerCase()], // Alternatif isimler eklenebilir
+            popularity: 50 // Orta düzey popülerlik
+          };
+          
+          // Veritabanına ekle
+          await this.symbolService.addOrUpdateSymbol(symbolData);
+          
+          results.push({
+            symbol,
+            success: true
+          });
+          
+          this.logger.log(`Sembol başarıyla eklendi: ${symbol}`);
+        } catch (error) {
+          this.logger.error(`Sembol ekleme hatası (${symbol}): ${error.message}`);
+          
+          results.push({
+            symbol,
+            success: false,
+            reason: error.message
+          });
+        }
+      }
+      
+      // Sonuç mesajını oluştur
+      const successSymbols = results.filter(r => r.success).map(r => r.symbol);
+      const failedSymbols = results.filter(r => !r.success).map(r => r.symbol);
+      
+      let responseMessage = `📊 Veritabanı Güncelleme Sonucu (${dataType.toUpperCase()}):\n\n`;
+      
+      if (successSymbols.length > 0) {
+        responseMessage += `✅ Başarıyla eklenen semboller (${successSymbols.length}):\n${successSymbols.join(', ')}\n\n`;
+      }
+      
+      if (failedSymbols.length > 0) {
+        responseMessage += `❌ Eklenemeyen semboller (${failedSymbols.length}):\n${failedSymbols.join(', ')}`;
+      }
+      
+      this.logger.log(`İşlem tamamlandı, cevap gönderiliyor: ${responseMessage}`);
+      
+      await ctx.reply(responseMessage);
+      
+    } catch (error) {
+      this.logger.error(`Data komut hatası: ${error.message}`, error.stack);
+      await ctx.reply('Bir hata oluştu. Lütfen daha sonra tekrar deneyin.');
+    }
+  }
+
+  // Fiyat bilgisini formatla (çeşitli biçimlendirme seçenekleri)
+  private formatPriceForDisplay(price: AssetPrice): string {
+    const { symbol, price: priceValue, percentChange24h, name, source, type } = price;
+    
+    // Fiyat formatlaması
+    let priceFormatted: string;
+    if (priceValue >= 1000) {
+      priceFormatted = priceValue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    } else if (priceValue >= 1) {
+      priceFormatted = priceValue.toFixed(2);
+    } else if (priceValue >= 0.01) {
+      priceFormatted = priceValue.toFixed(4);
+    } else if (priceValue >= 0.0001) {
+      priceFormatted = priceValue.toFixed(6);
+    } else {
+      priceFormatted = priceValue.toFixed(8);
+    }
+    
+    // 24 saatlik değişim formatlaması
+    const changePrefix = percentChange24h >= 0 ? '🟢 +' : '🔴 ';
+    const changeValue = `${changePrefix}${percentChange24h.toFixed(2)}%`;
+    
+    // Gösterilecek sembol (varsa ek bilgilerle)
+    let displaySymbol = symbol;
+    if (displaySymbol.endsWith('.IS')) {
+      displaySymbol = displaySymbol.replace('.IS', '');
+    }
+    
+    // Varsayılan tip: crypto
+    const actualType = type || 'crypto';
+    const typeEmoji = actualType === 'crypto' ? '🔹' : '📈';
+    const nameInfo = name && name !== symbol ? ` (${name})` : '';
+    
+    return `${typeEmoji} ${displaySymbol}${nameInfo}: $${priceFormatted} ${changeValue}`;
   }
 } 

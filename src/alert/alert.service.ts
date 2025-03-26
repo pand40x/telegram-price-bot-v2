@@ -33,10 +33,10 @@ export class AlertService {
     return `${chatId}:${listName}`;
   }
 
-  async createAlertList(chatId: string, listName: string, userId: string = null): Promise<boolean> {
+  async createAlertList(chatId: string, listName: string, userId: string = null, isGroupChat: boolean = false): Promise<boolean> {
     try {
       const normalizedListName = listName.trim().toLowerCase();
-      const isGroup = this.isChatGroup(chatId);
+      const isGroup = isGroupChat || this.isChatGroup(chatId);
       
       // Eğer grup ise ve userId verilmişse, kişiselleştirilmiş bir ID oluştur
       const effectiveUserId = isGroup && userId ? this.getUserId(chatId, userId) : chatId;
@@ -84,30 +84,52 @@ export class AlertService {
       const effectiveUserId = userId || chatId;
       const isGroup = this.isChatGroup(chatId);
       
-      // Önce normal ID ile listede ara
-      let list = await this.alertListModel.findOne({ 
-        userId: effectiveUserId, 
-        listName: normalizedListName 
-      }).exec();
+      // Sorgu oluştur
+      let query: any = {
+        listName: normalizedListName
+      };
       
-      // Eğer bulunamadıysa ve bu bir grup ise, eski format ID ile ara
-      if (!list && isGroup && userId) {
+      if (isGroup && userId) {
+        // Grup içinde - hem kullanıcı ID'si, hem eski format, hem de grup ID'si ile ara
         const oldFormatId = `${chatId}_${userId}`;
-        list = await this.alertListModel.findOne({ 
-          userId: oldFormatId, 
-          listName: normalizedListName 
-        }).exec();
+        query.$or = [
+          { userId: effectiveUserId },
+          { userId: oldFormatId },
+          { userId: chatId },
+          { chatId: chatId }
+        ];
+      } else {
+        // Özel sohbette - sadece kullanıcı ID'si ile ara
+        query.$or = [
+          { userId: effectiveUserId },
+          { chatId: chatId }
+        ];
+      }
+      
+      // Sorguyu çalıştır
+      let list = await this.alertListModel.findOne(query).exec();
+      
+      if (!list) {
+        this.logger.debug(`"${normalizedListName}" listesi bulunamadı, bot yanıtı için.`);
         
-        // Eğer eski format ile bulunduysa, log oluştur
-        if (list) {
-          this.logger.debug(`"${normalizedListName}" listesi eski format ID ile bulundu: ${oldFormatId}, sembol eklenecek`);
-          // Listeyi yeni ID formatına taşımayı öneriyoruz
-          this.logger.debug(`Bu listeyi yeni ID formatına taşımak için /migrasyonliste komutunu kullanabilirsiniz`);
+        // Liste yoksa ve grup sohbetinde isek, otomatik oluşturmayı dene
+        if (isGroup) {
+          // Yeni liste oluştur
+          const createSuccess = await this.createAlertList(chatId, normalizedListName, effectiveUserId, true);
+          
+          if (createSuccess) {
+            this.logger.debug(`"${normalizedListName}" listesi otomatik olarak oluşturuldu, tekrar aramayı dene`);
+            list = await this.alertListModel.findOne(query).exec();
+          } else {
+            return false;
+          }
+        } else {
+          return false;
         }
       }
       
       if (!list) {
-        this.logger.debug(`Uyarı listesi bulunamadı: ${normalizedListName}`);
+        this.logger.debug(`"${normalizedListName}" listesi oluşturulamadı veya bulunamadı`);
         return false;
       }
       
@@ -115,7 +137,7 @@ export class AlertService {
       const listUserId = list.userId;
       
       // Sembol zaten listede var mı kontrol et
-      if (list.symbols.includes(normalizedSymbol)) {
+      if (list.symbols && list.symbols.includes(normalizedSymbol)) {
         this.logger.debug(`Sembol zaten uyarı listesinde mevcut: ${normalizedSymbol}`);
         // Sadece eşiği güncelle
         await this.alertListModel.findOneAndUpdate(
@@ -125,7 +147,7 @@ export class AlertService {
           },
           {
             $set: { 
-              [`highThresholds.${normalizedSymbol}`]: percentThreshold
+              [`highThresholds.${this.normalizeSymbolForMongoDB(normalizedSymbol)}`]: percentThreshold
             }
           }
         ).exec();
@@ -135,7 +157,39 @@ export class AlertService {
       
       // Sembolün mevcut fiyatını al - crypto tipinde alınacak şekilde ayarla
       this.logger.debug(`Sembolün mevcut fiyatını alınıyor: ${normalizedSymbol}`);
-      const prices = await this.priceService.getPrices([normalizedSymbol], 'crypto');
+      
+      // Liste adına göre asset tipini belirle
+      let assetType: 'stock' | 'crypto' = normalizedListName === 'borsa' ? 'stock' : 'crypto';
+      
+      // Sembolün formatına göre de tür belirlemeyi dene (liste adı "borsa" değilse bile THYAO gibi bir sembol stock olmalı)
+      const turkishStockSymbols = [
+        'THYAO', 'ASELS', 'KCHOL', 'SISE', 'GARAN', 'AKBNK', 'TUPRS', 'BIMAS', 'FROTO', 'EREGL', 'YKBNK',
+        'PGSUS', 'TAVHL', 'TCELL', 'SAHOL', 'HEKTS', 'VESTL', 'TTKOM', 'DOHOL', 'KRDMD', 'PETKM', 
+        'EKGYO', 'TOASO', 'SASA', 'ARCLK', 'KOZAA', 'KOZAL', 'MAVI', 'ISCTR', 'ODAS', 'ALFAS'
+      ];
+      
+      const foreignStockSymbols = [
+        'AAPL', 'MSFT', 'AMZN', 'GOOG', 'META', 'TSLA', 'NVDA', 'JPM', 'V', 'WMT', 'JNJ', 'PG', 'BABA',
+        'XOM', 'DIS', 'NFLX', 'UBER', 'INTC', 'IBM', 'F', 'GM', 'AMD', 'MCD', 'KO', 'PEP', 'NKE'
+      ];
+      
+      // Borsada işlem gören hisse senedi göstergelerini kontrol et
+      const isStockByFormat = normalizedSymbol.includes('.') || // THYAO.IS gibi 
+                             normalizedSymbol.includes('-') ||  // Apple-Inc gibi
+                             /XU\d+/.test(normalizedSymbol) ||  // XU100 gibi endeks
+                             (normalizedSymbol.length >= 3 && normalizedSymbol.length <= 5 && /^[A-Z]+$/.test(normalizedSymbol)); // Türk hisseleri genelde 3-5 harfli büyük harfler
+      
+      const isInStockList = turkishStockSymbols.includes(normalizedSymbol) || foreignStockSymbols.includes(normalizedSymbol);
+      
+      // Eğer sembol tüm koşullara göre bir hisse senedi ise, asset tipini 'stock' olarak ayarla
+      if (isInStockList || isStockByFormat) {
+        assetType = 'stock';
+        this.logger.debug(`"${normalizedSymbol}" sembolü, formatı veya içeriği nedeniyle 'stock' olarak tanımlandı`);
+      }
+      
+      this.logger.debug(`"${normalizedListName}" listesi için '${assetType}' tipi kullanılıyor`);
+      
+      const prices = await this.priceService.getPrices([normalizedSymbol], assetType);
       let currentPrice = 0;
       
       if (prices.length > 0) {
@@ -149,14 +203,13 @@ export class AlertService {
       // Listeyi güncelle
       const result = await this.alertListModel.findOneAndUpdate(
         {
-          userId: listUserId,
-          listName: normalizedListName
+          _id: list._id // Doğrudan _id ile güncelleme yap
         },
         {
           $addToSet: { symbols: normalizedSymbol },
           $set: { 
-            [`lastPrices.${normalizedSymbol}`]: currentPrice,
-            [`highThresholds.${normalizedSymbol}`]: percentThreshold,
+            [`lastPrices.${this.normalizeSymbolForMongoDB(normalizedSymbol)}`]: currentPrice,
+            [`highThresholds.${this.normalizeSymbolForMongoDB(normalizedSymbol)}`]: percentThreshold,
             updatedAt: new Date()
           }
         },
@@ -220,9 +273,9 @@ export class AlertService {
         {
           $pull: { symbols: normalizedSymbol },
           $unset: { 
-            [`lastPrices.${normalizedSymbol}`]: "",
-            [`highThresholds.${normalizedSymbol}`]: "",
-            [`lowThresholds.${normalizedSymbol}`]: ""
+            [`lastPrices.${this.normalizeSymbolForMongoDB(normalizedSymbol)}`]: "",
+            [`highThresholds.${this.normalizeSymbolForMongoDB(normalizedSymbol)}`]: "",
+            [`lowThresholds.${this.normalizeSymbolForMongoDB(normalizedSymbol)}`]: ""
           },
           updatedAt: new Date()
         },
@@ -429,9 +482,9 @@ export class AlertService {
     }
   }
 
-  @Cron('*/1 * * * *')
-  async checkCryptoAlertLists() {
-    this.logger.debug('Kripto uyarı listelerini kontrol etme zamanı');
+  @Cron(CronExpression.EVERY_MINUTE)
+  async checkAlertLists() {
+    this.logger.debug('Uyarı listelerini kontrol etme zamanı');
     
     try {
       // Aktif uyarı listelerini bul
@@ -447,19 +500,12 @@ export class AlertService {
       for (const list of activeLists) {
         if (list.symbols.length === 0) continue;
         
-        // Liste adından veya içeriğinden crypto tipini belirle
-        const isCryptoList = !list.listName.includes('hisse') && 
-          list.symbols.every(symbol => 
-            !symbol.endsWith('.IS') && 
-            !symbol.includes('XU') && 
-            !['BIST', 'BIST100', 'XU100'].includes(symbol)
-          );
+        // Liste adına göre asset tipini belirle
+        const assetType = list.listName === 'borsa' ? 'stock' : 'crypto';
         
-        if (!isCryptoList) continue; // Sadece kripto listelerini işle
-        
-        // Listedeki sembollerin fiyatlarını al - crypto tipinde
-        this.logger.debug(`"${list.listName}" listesindeki ${list.symbols.length} kripto sembol için fiyat alınıyor`);
-        const prices = await this.priceService.getPrices(list.symbols, 'crypto');
+        // Listedeki sembollerin fiyatlarını al - liste tipine göre
+        this.logger.debug(`"${list.listName}" listesindeki ${list.symbols.length} sembol için fiyat alınıyor (tip: ${assetType})`);
+        const prices = await this.priceService.getPrices(list.symbols, assetType);
         
         if (prices.length === 0) continue;
         
@@ -469,7 +515,9 @@ export class AlertService {
         for (const price of prices) {
           const symbol = price.symbol;
           const currentPrice = price.price;
-          const lastPrice = list.lastPrices.get(symbol) || 0;
+          // MongoDB için normalleştirilmiş sembol kullan
+          const normalizedSymbol = this.normalizeSymbolForMongoDB(symbol);
+          const lastPrice = list.lastPrices.get(normalizedSymbol) || 0;
           
           if (lastPrice === 0) {
             // İlk kez fiyat alınıyorsa, kaydet ve geç
@@ -481,7 +529,7 @@ export class AlertService {
           const percentChange = ((currentPrice - lastPrice) / lastPrice) * 100;
           
           // Sembol için özel eşik değerini al, yoksa listedeki genel eşiği kullan
-          const thresholdPercent = list.highThresholds.get(symbol) || list.percentChangeThreshold;
+          const thresholdPercent = list.highThresholds.get(normalizedSymbol) || list.percentChangeThreshold;
           this.logger.debug(`"${symbol}" için eşik kontrolü: değişim %${percentChange.toFixed(2)}, eşik %${thresholdPercent}`);
           
           // Eşik değerini kontrol et
@@ -506,11 +554,11 @@ export class AlertService {
         // Eğer alarm mesajı varsa, bildirim gönder
         if (alertMessages.length > 0) {
           // Bildirim gönderilecek chat ID'sini belirle
-          const chatId = list.chatId || list.userId;
+          const chatId = list.chatId || list.userId; // Eğer chatId varsa onu kullan, yoksa userId'yi kullan
           const listType = list.isGroupChat ? 'grup' : 'kişisel';
           
           // Mesajın formatını sadeleştir
-          const alertMessage = `🚨 "${list.listName}" için kripto fiyat uyarıları:\n\n${alertMessages.join('\n')}`;
+          const alertMessage = `🚨 "${list.listName}" için fiyat uyarıları:\n\n${alertMessages.join('\n')}`;
           
           try {
             this.logger.debug(`${listType} bildirim gönderiliyor, Chat ID: ${chatId}`);
@@ -524,115 +572,25 @@ export class AlertService {
         await this.updateLastCheckTime(list._id);
       }
     } catch (error) {
-      this.logger.error(`Kripto uyarı listeleri kontrol hatası: ${error.message}`);
+      this.logger.error(`Uyarı listeleri kontrol hatası: ${error.message}`);
     }
   }
 
-  @Cron('*/15 * * * *')
-  async checkStockAlertLists() {
-    this.logger.debug('Hisse uyarı listelerini kontrol etme zamanı');
-    
-    try {
-      // Aktif uyarı listelerini bul
-      const activeLists = await this.alertListModel.find({ isActive: true }).exec();
-      
-      if (activeLists.length === 0) {
-        this.logger.debug('Aktif uyarı listesi bulunamadı');
-        return;
-      }
-      
-      this.logger.debug(`${activeLists.length} adet aktif uyarı listesi kontrol ediliyor`);
-      
-      for (const list of activeLists) {
-        if (list.symbols.length === 0) continue;
-        
-        // Liste adından veya içeriğinden stock tipini belirle
-        const isStockList = list.listName.includes('hisse') || 
-          list.symbols.some(symbol => 
-            symbol.endsWith('.IS') || 
-            symbol.includes('XU') || 
-            ['BIST', 'BIST100', 'XU100'].includes(symbol)
-          );
-        
-        if (!isStockList) continue; // Sadece hisse listelerini işle
-        
-        // Listedeki sembollerin fiyatlarını al - stock tipinde
-        this.logger.debug(`"${list.listName}" listesindeki ${list.symbols.length} hisse sembol için fiyat alınıyor`);
-        const prices = await this.priceService.getPrices(list.symbols, 'stock');
-        
-        if (prices.length === 0) continue;
-        
-        const alertMessages: string[] = [];
-        
-        // Her semboldeki fiyat değişikliklerini kontrol et
-        for (const price of prices) {
-          const symbol = price.symbol;
-          const currentPrice = price.price;
-          const lastPrice = list.lastPrices.get(symbol) || 0;
-          
-          if (lastPrice === 0) {
-            // İlk kez fiyat alınıyorsa, kaydet ve geç
-            await this.updateLastPrice(list._id, symbol, currentPrice);
-            continue;
-          }
-          
-          // Yüzde değişimi hesapla
-          const percentChange = ((currentPrice - lastPrice) / lastPrice) * 100;
-          
-          // Sembol için özel eşik değerini al, yoksa listedeki genel eşiği kullan
-          const thresholdPercent = list.highThresholds.get(symbol) || list.percentChangeThreshold;
-          this.logger.debug(`"${symbol}" için eşik kontrolü: değişim %${percentChange.toFixed(2)}, eşik %${thresholdPercent}`);
-          
-          // Eşik değerini kontrol et
-          if (Math.abs(percentChange) >= thresholdPercent) {
-            // Daha sade format oluştur
-            const direction = percentChange > 0 ? '📈' : '📉';
-            const absPercentChange = Math.abs(percentChange).toFixed(2);
-            
-            // Artık veya azalış olarak tanımla
-            const changeType = percentChange > 0 ? "yükseldi" : "düştü";
-            
-            // Sade format ile mesaj oluştur
-            const message = `${direction} ${symbol} %${absPercentChange} ${changeType}, fiyat: ${currentPrice.toFixed(8)}`;
-            
-            alertMessages.push(message);
-            
-            // Son fiyatı güncelle
-            await this.updateLastPrice(list._id, symbol, currentPrice);
-          }
-        }
-        
-        // Eğer alarm mesajı varsa, bildirim gönder
-        if (alertMessages.length > 0) {
-          // Bildirim gönderilecek chat ID'sini belirle
-          const chatId = list.chatId || list.userId;
-          const listType = list.isGroupChat ? 'grup' : 'kişisel';
-          
-          // Mesajın formatını sadeleştir
-          const alertMessage = `🚨 "${list.listName}" için hisse fiyat uyarıları:\n\n${alertMessages.join('\n')}`;
-          
-          try {
-            this.logger.debug(`${listType} bildirim gönderiliyor, Chat ID: ${chatId}`);
-            await this.bot.telegram.sendMessage(chatId, alertMessage);
-          } catch (error) {
-            this.logger.error(`Telegram mesajı gönderme hatası: ${error.message}`);
-          }
-        }
-        
-        // Son kontrol zamanını güncelle
-        await this.updateLastCheckTime(list._id);
-      }
-    } catch (error) {
-      this.logger.error(`Hisse uyarı listeleri kontrol hatası: ${error.message}`);
-    }
+  // Mongo ile uyumlu sembol adı oluşturmak için yardımcı metod
+  private normalizeSymbolForMongoDB(symbol: string): string {
+    // Türk hisse senetlerinin sembollerindeki .IS ekini MongoDB için kaldır
+    return symbol.endsWith('.IS') ? symbol.replace('.IS', '') : symbol;
   }
 
   private async updateLastPrice(listId: string, symbol: string, price: number): Promise<void> {
     try {
+      // Sembolü normalleştir
+      const normalizedSymbol = this.normalizeSymbolForMongoDB(symbol);
+      
       await this.alertListModel.updateOne(
         { _id: listId },
         { 
-          $set: { [`lastPrices.${symbol}`]: price }
+          $set: { [`lastPrices.${normalizedSymbol}`]: price }
         }
       ).exec();
     } catch (error) {
@@ -676,6 +634,49 @@ export class AlertService {
       }
     } catch (error) {
       this.logger.error(`Liste taşıma hatası: ${error.message}`);
+    }
+  }
+
+  // Liste var mı kontrol et
+  async doesAlertListExist(chatId: string, listName: string, userId: string = null): Promise<boolean> {
+    try {
+      const normalizedListName = listName.toLowerCase();
+      const effectiveUserId = userId || chatId;
+      const isGroup = this.isChatGroup(chatId);
+      
+      // Sorgu oluştur
+      let query: any = {
+        listName: normalizedListName
+      };
+      
+      if (isGroup && userId) {
+        // Grup içinde - hem kullanıcı ID'si, hem eski format, hem de grup ID'si ile ara
+        const oldFormatId = `${chatId}_${userId}`;
+        query.$or = [
+          { userId: effectiveUserId },
+          { userId: oldFormatId },
+          { userId: chatId },
+          { chatId: chatId }
+        ];
+      } else {
+        // Özel sohbette - sadece kullanıcı ID'si ile ara
+        query.$or = [
+          { userId: effectiveUserId },
+          { chatId: chatId }
+        ];
+      }
+      
+      // Sorguyu çalıştır
+      const existingList = await this.alertListModel.findOne(query).exec();
+      
+      if (!existingList && isGroup) {
+        this.logger.debug(`"${normalizedListName}" listesi grup ${chatId} içinde kullanıcı ${userId} için bulunamadı`);
+      }
+      
+      return !!existingList;
+    } catch (error) {
+      this.logger.error(`Liste kontrol hatası: ${error.message}`);
+      return false;
     }
   }
 } 

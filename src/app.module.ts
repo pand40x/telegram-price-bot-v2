@@ -47,9 +47,14 @@ import { BinanceModule } from './binance/binance.module';
     MongooseModule.forRootAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
-      useFactory: (configService: ConfigService) => ({
-        uri: configService.get('MONGODB_URI'),
-      }),
+      useFactory: (configService: ConfigService) => {
+        const uri = configService.get('MONGODB_URI');
+        console.log('MongoDB URI:', uri); // URI'yi debug etmek için log
+        return {
+          uri: uri,
+          dbName: 'crypto-price-bot', // Veritabanı adını açıkça belirt
+        };
+      },
     }),
     ScheduleModule.forRoot(),
     SymbolModule,

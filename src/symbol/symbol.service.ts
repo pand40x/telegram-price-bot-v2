@@ -1430,26 +1430,37 @@ export class SymbolService implements OnModuleInit {
    * Sembol veritabanına yeni sembol ekle veya güncelle
    */
   async addOrUpdateSymbol(symbol: SymbolMapping): Promise<void> {
-    // In-memory cache'i güncelle
-    const existingIdx = this.symbolDatabase.findIndex(s => s.symbol === symbol.symbol);
-    if (existingIdx >= 0) {
-      this.symbolDatabase[existingIdx] = symbol;
-          } else {
-      this.symbolDatabase.push(symbol);
+    try {
+      this.logger.log(`Sembol ekleme işlemi başlatıldı: ${symbol.symbol} - Tür: ${symbol.type}`);
+      
+      // In-memory cache'i güncelle
+      const existingIdx = this.symbolDatabase.findIndex(s => s.symbol === symbol.symbol);
+      if (existingIdx >= 0) {
+        this.logger.log(`Mevcut sembol güncelleniyor: ${symbol.symbol}`);
+        this.symbolDatabase[existingIdx] = symbol;
+      } else {
+        this.logger.log(`Yeni sembol ekleniyor: ${symbol.symbol}`);
+        this.symbolDatabase.push(symbol);
+      }
+      
+      // MongoDB'ye kaydet
+      const result = await this.symbolDataModel.findOneAndUpdate(
+        { symbol: symbol.symbol },
+        {
+          symbol: symbol.symbol,
+          type: symbol.type,
+          name: symbol.name,
+          aliases: symbol.aliases,
+          popularity: symbol.popularity
+        },
+        { upsert: true, new: true }
+      );
+      
+      this.logger.log(`Sembol başarıyla kaydedildi: ${symbol.symbol}, ID: ${result._id}`);
+    } catch (error) {
+      this.logger.error(`Sembol kaydetme hatası: ${error.message}`, error.stack);
+      throw error; // Hatayı yukarıya ilet
     }
-    
-    // MongoDB'ye kaydet
-    await this.symbolDataModel.findOneAndUpdate(
-      { symbol: symbol.symbol },
-      {
-        symbol: symbol.symbol,
-        type: symbol.type,
-        name: symbol.name,
-        aliases: symbol.aliases,
-        popularity: symbol.popularity
-      },
-      { upsert: true }
-    );
   }
 
   /**
@@ -1644,5 +1655,53 @@ export class SymbolService implements OnModuleInit {
       this.logger.error(`Liste silme hatası: ${error.message}`);
       return false;
     }
+  }
+
+  /**
+   * Verilen metnin bir ticker (sembol) olup olmadığını kontrol eder
+   * @param text Kontrol edilecek metin
+   * @returns true: ticker, false: değil
+   */
+  async isTickerSymbol(text: string): Promise<boolean> {
+    if (!text || text.trim() === '') return false;
+    
+    const upperText = text.toUpperCase().trim();
+    
+    // Bazı anahtar kelimeler kesinlikle ticker değil
+    const nonTickerKeywords = ['HISSE', 'KRIPTO', 'CRYPTO', 'STOCK', 'ENDEKS', 'INDEX', 'LISTE'];
+    if (nonTickerKeywords.includes(upperText)) {
+      return false;
+    }
+    
+    // Veritabanında bu sembol var mı?
+    const exactMatch = this.symbolDatabase.find(s => s.symbol === upperText || s.symbol === `${upperText}.IS`);
+    if (exactMatch) {
+      return true;
+    }
+    
+    // Türk hissesi formatı kontrolü
+    if (upperText.endsWith('.IS') || this.isPotentialTurkishStock(upperText)) {
+      return true;
+    }
+    
+    // Potansiyel sembol formatı (2-5 karakter, tümü büyük harf)
+    if (upperText.length >= 2 && upperText.length <= 5 && /^[A-Z0-9]+$/.test(upperText)) {
+      return true;
+    }
+    
+    // Eğer veritabanında alias olarak mevcutsa
+    const aliasMatch = this.symbolDatabase.find(s => 
+      s.aliases.some(alias => alias.toUpperCase() === upperText)
+    );
+    if (aliasMatch) {
+      return true;
+    }
+    
+    // Eğer sayı ise ticker değil
+    if (!isNaN(parseFloat(text))) {
+      return false;
+    }
+    
+    return false;
   }
 } 

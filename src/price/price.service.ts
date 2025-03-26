@@ -58,18 +58,40 @@ export class PriceService {
         'BABA', 'KO', 'PEP', 'GE'
       ];
       
+      // Borsa İstanbul sembolleri
+      const turkishStocks = [
+        'THYAO', 'ASELS', 'KCHOL', 'SISE', 'GARAN', 'AKBNK', 'TUPRS', 'BIMAS', 'FROTO', 'EREGL', 'YKBNK',
+        'PGSUS', 'TAVHL', 'TCELL', 'SAHOL', 'HEKTS', 'VESTL', 'TTKOM', 'DOHOL', 'KRDMD', 'PETKM', 
+        'EKGYO', 'TOASO', 'SASA', 'ARCLK', 'KOZAA', 'KOZAL', 'MAVI', 'ISCTR', 'ODAS', 'ALFAS'
+      ];
+      
+      // Tüm hisse sembolleri
+      const allStocks = [...commonStocks, ...turkishStocks];
+      
       // Önce doğrudan eşleşme kontrol et
-      const exactMatch = normalizedSymbols.some(s => commonStocks.includes(s));
+      const exactMatch = normalizedSymbols.some(s => allStocks.includes(s));
       if (exactMatch) {
-        this.logger.debug(`Direct stock symbol match found in commonStocks list`);
+        this.logger.debug(`Direct stock symbol match found in stocks list`);
         detectedType = 'stock';
       } else {
         // Yoksa diğer belirteçlere bak
         const hasStockIndicators = normalizedSymbols.some(
-          s => s.includes('.') || s.startsWith('$')
+          s => s.includes('.') || s.startsWith('$') || 
+               /XU\d+/.test(s) || // BIST endeksleri (XU100, XU030 vb.)
+               (s.length >= 3 && s.length <= 5 && /^[A-Z]+$/.test(s)) // Türk hisseleri genelde 3-5 harfli büyük harfler
         );
         
-        detectedType = hasStockIndicators ? 'stock' : 'crypto';
+        if (hasStockIndicators) {
+          this.logger.debug(`Stock indicators found in symbol format`);
+          detectedType = 'stock';
+        } else {
+          // Kripto para olduğunu gösteren belirteçler
+          const hasCryptoIndicators = normalizedSymbols.some(
+            s => s === 'BTC' || s === 'ETH' || s.includes('USD') || s.endsWith('USDT')
+          );
+          
+          detectedType = hasCryptoIndicators ? 'crypto' : 'crypto'; // Varsayılan olarak kripto
+        }
       }
       
       this.logger.log(`Detected asset type: ${detectedType} for symbols: ${symbols.join(', ')}`);
